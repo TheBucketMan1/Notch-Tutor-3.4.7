@@ -1,0 +1,75 @@
+name: Build installers
+
+# Builds whenever you upload a new .zip of the app (or when you click Run workflow).
+on:
+  workflow_dispatch:
+  push:
+    paths: ['*.zip']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            script: dist:mac
+          - os: windows-latest
+            script: dist:win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip the app
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Path . -Filter 'notch-tutor.zip' | Select-Object -First 1
+          if (-not $zip) { $zip = Get-ChildItem -Path . -Filter '*.zip' | Select-Object -First 1 }
+          if (-not $zip) { throw 'No .zip found. Upload notch-tutor.zip to the repository.' }
+          Expand-Archive -Path $zip.FullName -DestinationPath extracted -Force
+          $pkg = Get-ChildItem -Path extracted -Filter 'package.json' -Recurse -Depth 2 | Where-Object { $_.FullName -notmatch 'node_modules' } | Select-Object -First 1
+          if (-not $pkg) { throw 'package.json not found inside the zip.' }
+          "APP_DIR=$($pkg.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install
+        run: npm ci
+        working-directory: ${{ env.APP_DIR }}
+
+      - name: Build
+        run: npm run ${{ matrix.script }}
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Collect installers
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path installers | Out-Null
+          Get-ChildItem -Path (Join-Path $env:APP_DIR 'release') -File | Where-Object { $_.Extension -in '.dmg', '.exe' } | Copy-Item -Destination installers
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: installers/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Notch Tutor build ${{ github.run_number }}
+          files: dist/*
